@@ -147,20 +147,56 @@ def test_format_footer_unknown_field_silently_ignored():
     assert out == "gpt-5.4 · 50%"
 
 
+def test_format_footer_usage_pct_with_plan():
+    out = format_runtime_footer(
+        model="openai/gpt-5.6",
+        context_tokens=50, context_length=100,
+        cwd="",
+        usage_percent=62,
+        usage_plan="Plus",
+        fields=("model", "context_pct", "usage_pct"),
+    )
+    assert out == "gpt-5.6 · 50% · Plus 62%"
+
+
+def test_format_footer_usage_pct_without_plan():
+    out = format_runtime_footer(
+        model="m",
+        context_tokens=0, context_length=None,
+        cwd="",
+        usage_percent=100,
+        usage_plan=None,
+        fields=("usage_pct",),
+    )
+    assert out == "⚡ 100%"
+
+
+def test_format_footer_usage_pct_skipped_when_missing():
+    out = format_runtime_footer(
+        model="openai/gpt-5.6",
+        context_tokens=50, context_length=100,
+        cwd="",
+        usage_percent=None,
+        fields=("model", "context_pct", "usage_pct"),
+    )
+    # No usage data => field dropped silently, no artifact
+    assert out == "gpt-5.6 · 50%"
+
+
 # ---------------------------------------------------------------------------
 # resolve_footer_config
 # ---------------------------------------------------------------------------
 
 def test_resolve_defaults_off_empty_config():
     cfg = resolve_footer_config({}, "telegram")
-    assert cfg == {"enabled": False, "fields": ["model", "context_pct", "cwd"]}
+    assert cfg == {"enabled": False, "fields": ["model", "context_pct", "usage_pct", "cwd"]}
 
 
 def test_resolve_global_enable():
     user = {"display": {"runtime_footer": {"enabled": True}}}
     cfg = resolve_footer_config(user, "telegram")
     assert cfg["enabled"] is True
-    assert cfg["fields"] == ["model", "context_pct", "cwd"]
+    assert cfg["fields"] == ["model", "context_pct", "usage_pct", "cwd"]
 
 
 def test_resolve_platform_override_wins():
@@ -189,7 +225,7 @@ def test_resolve_platform_can_add_fields_only():
     }
     tg = resolve_footer_config(user, "telegram")
     assert tg["enabled"] is True
-    assert tg["fields"] == ["model", "context_pct", "cwd"]
+    assert tg["fields"] == ["model", "context_pct", "usage_pct", "cwd"]
     dc = resolve_footer_config(user, "discord")
     assert dc["enabled"] is True
     assert dc["fields"] == ["context_pct"]

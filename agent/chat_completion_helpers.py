@@ -1002,6 +1002,37 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
 
 
 
+def _format_fallback_notice(
+    agent, reason: "FailoverReason | None",
+    old_model: str, fb_model: str, fb_provider: str,
+) -> str:
+    """One-line, user-facing summary of a fallback switch.
+
+    For quota switches the line includes the local reset time when the 429
+    carried one (``agent._primary_limit_reset_at``, set in the eager-fallback
+    path of conversation_loop), so the user knows how long they'll be on the
+    fallback model.
+    """
+    until = ""
+    if reason in {FailoverReason.rate_limit, FailoverReason.billing}:
+        reset_epoch = getattr(agent, "_primary_limit_reset_at", None)
+        if reset_epoch:
+            try:
+                from datetime import datetime
+                local = datetime.fromtimestamp(float(reset_epoch)).astimezone()
+                until = f" until ~{local.strftime('%H:%M')}"
+            except Exception:
+                until = ""
+    if reason == FailoverReason.rate_limit:
+        return f"⚠️ {old_model} usage limit hit — using {fb_model} ({fb_provider}){until}"
+    if reason == FailoverReason.billing:
+        return f"⚠️ {old_model} billing/credits exhausted — using {fb_model} ({fb_provider}){until}"
+    return (
+        f"🔄 Primary model failed — switching to fallback: "
+        f"{fb_model} via {fb_provider}"
+    )
+
+
 def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool:
     """Switch to the next fallback model/provider in the chain.
 
@@ -1247,10 +1278,37 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 api_mode=agent.api_mode,
             )
 
-        agent._buffer_status(
-            f"🔄 Primary model failed — switching to fallback: "
-            f"{fb_model} via {fb_provider}"
-        )
+        # User notice. Emitted DIRECTLY (not buffered) so the switch is
+        # visible even when the fallback turn succeeds — buffered status
+        # lines are dropped on success (_clear_status_buffer). Deduped per
+        # (provider, model) with a periodic re-announce: every turn re-probes
+        # the primary (restore_primary_runtime), so a usage window that stays
+        # exhausted for hours would otherwise re-announce the same switch on
+        # every single turn.
+        notice = _format_fallback_notice(agent, reason, old_model, fb_model, fb_provider)
+        notice_key = (fb_provider, fb_model)
+        now_mono = time.monotonic()
+        if (
+            notice_key != getattr(agent, "_fallback_notice_key", None)
+            or (now_mono - getattr(agent, "_fallback_notice_at", 0.0)) >= 1800
+        ):
+            agent._fallback_notice_key = notice_key
+            agent._fallback_notice_at = now_mono
+            agent._emit_status(notice)
+        else:
+            agent._buffer_status(notice)
+
+        # Refresh the account-usage gauge promptly — a quota fallback means
+        # the cached snapshot's percentages just went stale.
+        if reason in {FailoverReason.rate_limit, FailoverReason.billing}:
+            try:
+                from agent.account_usage import invalidate_cached_account_usage
+                invalidate_cached_account_usage(
+                    (agent._primary_runtime or {}).get("provider")
+                )
+            except Exception:
+                pass
+
         logger.info(
             "Fallback activated: %s → %s (%s)",
             old_model, fb_model, fb_provider,

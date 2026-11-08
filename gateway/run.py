@@ -9488,6 +9488,20 @@ class GatewayRunner:
             _footer_line = ""
             try:
                 from gateway.runtime_footer import build_footer_line as _bfl
+                # Account-usage gauge for the primary provider — cached and
+                # non-blocking, so a slow usage API can't delay the send path.
+                _usage_percent = None
+                _usage_plan = None
+                try:
+                    from agent.account_usage import get_cached_account_usage, usage_gauge
+                    _gauge = usage_gauge(
+                        get_cached_account_usage(agent_result.get("primary_provider"))
+                    )
+                    if _gauge:
+                        _usage_percent = _gauge["percent"]
+                        _usage_plan = _gauge["plan"]
+                except Exception:
+                    pass
                 _footer_line = _bfl(
                     user_config=_load_gateway_config(),
                     platform_key=_platform_config_key(source.platform),
@@ -9495,6 +9509,8 @@ class GatewayRunner:
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                     context_length=agent_result.get("context_length") or None,
                     cwd=os.environ.get("TERMINAL_CWD", ""),
+                    usage_percent=_usage_percent,
+                    usage_plan=_usage_plan,
                 )
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
@@ -12970,7 +12986,7 @@ class GatewayRunner:
                 model=_resolve_gateway_model(user_config) or None,
                 context_tokens=0,
                 context_length=None,
-                fields=effective.get("fields") or ["model", "context_pct", "cwd"],
+                fields=effective.get("fields") or ["model", "context_pct", "usage_pct", "cwd"],
             )
             if preview:
                 example = t("gateway.footer.example_line", preview=preview)
@@ -18136,6 +18152,15 @@ class GatewayRunner:
                 _output_toks = getattr(_agent, "session_completion_tokens", 0)
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
             _resolved_model = getattr(_agent, "model", None) if _agent else None
+            # Primary (configured) provider — used by the runtime footer's
+            # account-usage gauge.  The primary's plan limits stay relevant
+            # even while a fallback provider is active.
+            _primary_provider = None
+            if _agent:
+                _primary_provider = (
+                    (getattr(_agent, "_primary_runtime", None) or {}).get("provider")
+                    or getattr(_agent, "provider", None)
+                )
 
             if not final_response:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
@@ -18157,6 +18182,7 @@ class GatewayRunner:
                     "output_tokens": _output_toks,
                     "model": _resolved_model,
                     "context_length": _context_length,
+                    "primary_provider": _primary_provider,
                 }
             
             # Scan tool results for MEDIA:<path> tags that need to be delivered
@@ -18313,6 +18339,7 @@ class GatewayRunner:
                 "output_tokens": _output_toks,
                 "model": _resolved_model,
                 "context_length": _context_length,
+                "primary_provider": _primary_provider,
                 "session_id": effective_session_id,
                 "response_previewed": result.get("response_previewed", False),
                 "response_transformed": result.get("response_transformed", False),

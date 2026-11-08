@@ -201,3 +201,92 @@ def test_fetch_account_usage_openrouter_omits_quota_window_when_key_has_no_limit
     assert snapshot.windows == ()
     assert "Credits balance: $74.50" in snapshot.details
     assert "API key usage: $25.50 total • $1.25 today • $4.50 this week • $18.00 this month" in snapshot.details
+
+
+# ---------------------------------------------------------------------------
+# usage_gauge + get_cached_account_usage
+# ---------------------------------------------------------------------------
+
+def _snapshot_with_windows(*used_percents, plan="Plus"):
+    windows = tuple(
+        AccountUsageWindow(label=f"w{i}", used_percent=pct)
+        for i, pct in enumerate(used_percents)
+    )
+    return AccountUsageSnapshot(
+        provider="openai-codex",
+        source="usage_api",
+        fetched_at=datetime.now(timezone.utc),
+        plan=plan,
+        windows=windows,
+    )
+
+
+def test_usage_gauge_picks_binding_window():
+    from agent.account_usage import usage_gauge
+
+    gauge = usage_gauge(_snapshot_with_windows(37.4, 82.6))
+    assert gauge == {"percent": 83, "label": "w1", "reset_at": None, "plan": "Plus"}
+
+
+def test_usage_gauge_clamps_and_handles_missing():
+    from agent.account_usage import usage_gauge
+
+    assert usage_gauge(None) is None
+    assert usage_gauge(_snapshot_with_windows()) is None
+    # >100 from the API clamps to 100
+    assert usage_gauge(_snapshot_with_windows(140.0))["percent"] == 100
+
+
+def test_get_cached_account_usage_non_blocking_and_ttl(monkeypatch):
+    import agent.account_usage as mod
+
+    calls = []
+
+    def _fake_fetch(provider, *, base_url=None, api_key=None):
+        calls.append(provider)
+        return _snapshot_with_windows(50.0)
+
+    monkeypatch.setattr(mod, "fetch_account_usage", _fake_fetch)
+    monkeypatch.setattr(mod, "_usage_cache", {})
+
+    # First call returns None immediately and kicks off a background fetch.
+    assert mod.get_cached_account_usage("openai-codex") is None
+    for _ in range(100):
+        with mod._usage_cache_lock:
+            done = not mod._usage_cache["openai-codex"]["inflight"]
+        if done:
+            break
+        import time as _t
+        _t.sleep(0.01)
+    assert calls == ["openai-codex"]
+
+    # Within TTL: served from cache, no new fetch.
+    snap = mod.get_cached_account_usage("openai-codex")
+    assert snap is not None and snap.windows[0].used_percent == 50.0
+    assert calls == ["openai-codex"]
+
+    # Invalidation forces a refresh on next access.
+    mod.invalidate_cached_account_usage("openai-codex")
+    mod.get_cached_account_usage("openai-codex")
+    for _ in range(100):
+        with mod._usage_cache_lock:
+            done = not mod._usage_cache["openai-codex"]["inflight"]
+        if done:
+            break
+        import time as _t
+        _t.sleep(0.01)
+    assert calls == ["openai-codex", "openai-codex"]
+
+
+def test_get_cached_account_usage_short_circuits_unsupported_providers(monkeypatch):
+    import agent.account_usage as mod
+
+    def _boom(provider, **kwargs):
+        raise AssertionError("must not fetch for unsupported providers")
+
+    monkeypatch.setattr(mod, "fetch_account_usage", _boom)
+    monkeypatch.setattr(mod, "_usage_cache", {})
+    assert mod.get_cached_account_usage("custom") is None
+    assert mod.get_cached_account_usage("auto") is None
+    assert mod.get_cached_account_usage("") is None
+    assert mod.get_cached_account_usage(None) is None

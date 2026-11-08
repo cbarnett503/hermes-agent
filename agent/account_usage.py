@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -324,3 +326,99 @@ def fetch_account_usage(
     except Exception:
         return None
     return None
+
+
+# ── Cached, non-blocking accessor for hot render paths ──────────────────
+# The TUI status bar and gateway runtime footer render far too often to hit
+# the provider usage API directly.  get_cached_account_usage() returns the
+# last snapshot immediately and refreshes in a background daemon thread when
+# the TTL lapses.  A failed refresh keeps the stale snapshot and still resets
+# the TTL so a broken endpoint isn't hammered once per render.
+
+_USAGE_CACHE_TTL_SECONDS = 300.0
+_usage_cache_lock = threading.Lock()
+_usage_cache: dict[str, dict[str, Any]] = {}
+
+
+def invalidate_cached_account_usage(provider: Optional[str]) -> None:
+    """Force the next get_cached_account_usage() call to refresh.
+
+    Called when a rate-limit fallback activates so the gauge flips to the
+    exhausted state promptly instead of waiting out the TTL.
+    """
+    key = str(provider or "").strip().lower()
+    with _usage_cache_lock:
+        entry = _usage_cache.get(key)
+        if entry:
+            entry["fetched_at"] = 0.0
+
+
+def get_cached_account_usage(
+    provider: Optional[str],
+    *,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    ttl: float = _USAGE_CACHE_TTL_SECONDS,
+) -> Optional[AccountUsageSnapshot]:
+    """Return the cached account-usage snapshot without blocking.
+
+    Returns None until the first background fetch completes.  Providers with
+    no account-usage source (custom, auto) short-circuit to None.
+    """
+    key = str(provider or "").strip().lower()
+    if key in {"", "auto", "custom"}:
+        return None
+    now = time.monotonic()
+    with _usage_cache_lock:
+        entry = _usage_cache.setdefault(
+            key, {"snapshot": None, "fetched_at": 0.0, "inflight": False}
+        )
+        snapshot = entry["snapshot"]
+        if entry["inflight"] or (now - entry["fetched_at"]) < ttl:
+            return snapshot
+        entry["inflight"] = True
+
+    def _refresh() -> None:
+        snap = None
+        try:
+            snap = fetch_account_usage(key, base_url=base_url, api_key=api_key)
+        except Exception:
+            snap = None
+        with _usage_cache_lock:
+            fresh_entry = _usage_cache.setdefault(
+                key, {"snapshot": None, "fetched_at": 0.0, "inflight": False}
+            )
+            fresh_entry["inflight"] = False
+            fresh_entry["fetched_at"] = time.monotonic()
+            if snap is not None:
+                fresh_entry["snapshot"] = snap
+
+    threading.Thread(
+        target=_refresh, name=f"account-usage-{key}", daemon=True
+    ).start()
+    return snapshot
+
+
+def usage_gauge(snapshot: Optional[AccountUsageSnapshot]) -> Optional[dict[str, Any]]:
+    """Reduce a snapshot to the single binding constraint for compact display.
+
+    Picks the window with the highest used_percent (the one that will throttle
+    first) and returns {percent, label, reset_at, plan}, or None when the
+    snapshot has no percentage data.
+    """
+    if not snapshot or not snapshot.windows:
+        return None
+    binding: Optional[AccountUsageWindow] = None
+    for window in snapshot.windows:
+        if window.used_percent is None:
+            continue
+        if binding is None or float(window.used_percent) > float(binding.used_percent):
+            binding = window
+    if binding is None:
+        return None
+    return {
+        "percent": max(0, min(100, round(float(binding.used_percent)))),
+        "label": binding.label,
+        "reset_at": binding.reset_at,
+        "plan": snapshot.plan,
+    }

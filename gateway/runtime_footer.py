@@ -8,8 +8,8 @@ Config (``~/.hermes/config.yaml``)::
 
     display:
       runtime_footer:
-        enabled: true                       # off by default
-        fields: [model, context_pct, cwd]   # order shown; drop any to hide
+        enabled: true                                  # off by default
+        fields: [model, context_pct, usage_pct, cwd]   # order shown; drop any to hide
 
 Per-platform overrides live under ``display.platforms.<platform>.runtime_footer``.
 Users can toggle the global setting with ``/footer on|off`` from both the CLI
@@ -28,7 +28,7 @@ from __future__ import annotations
 import os
 from typing import Any, Iterable, Optional
 
-_DEFAULT_FIELDS: tuple[str, ...] = ("model", "context_pct", "cwd")
+_DEFAULT_FIELDS: tuple[str, ...] = ("model", "context_pct", "usage_pct", "cwd")
 _SEP = " · "
 
 
@@ -94,6 +94,8 @@ def format_runtime_footer(
     context_tokens: int,
     context_length: Optional[int],
     cwd: Optional[str] = None,
+    usage_percent: Optional[int] = None,
+    usage_plan: Optional[str] = None,
     fields: Iterable[str] = _DEFAULT_FIELDS,
 ) -> str:
     """Render the footer line, or return "" if no fields have data.
@@ -111,6 +113,14 @@ def format_runtime_footer(
             if context_length and context_length > 0 and context_tokens >= 0:
                 pct = max(0, min(100, round((context_tokens / context_length) * 100)))
                 parts.append(f"{pct}%")
+        elif field == "usage_pct":
+            # Account plan usage (e.g. ChatGPT Plus windows). Plan-name
+            # prefix distinguishes it from the context percentage.
+            if usage_percent is not None:
+                parts.append(
+                    f"{usage_plan} {usage_percent}%" if usage_plan
+                    else f"⚡ {usage_percent}%"
+                )
         elif field == "cwd":
             rel = _home_relative_cwd(cwd or os.environ.get("TERMINAL_CWD", ""))
             if rel:
@@ -130,6 +140,8 @@ def build_footer_line(
     context_tokens: int,
     context_length: Optional[int],
     cwd: Optional[str] = None,
+    usage_percent: Optional[int] = None,
+    usage_plan: Optional[str] = None,
 ) -> str:
     """Top-level entry point used by gateway/run.py.
 
@@ -145,5 +157,7 @@ def build_footer_line(
         context_tokens=context_tokens,
         context_length=context_length,
         cwd=cwd,
+        usage_percent=usage_percent,
+        usage_plan=usage_plan,
         fields=cfg.get("fields") or _DEFAULT_FIELDS,
     )

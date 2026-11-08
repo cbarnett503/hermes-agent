@@ -2743,6 +2743,14 @@ def run_conversation(
                             )
                         else:
                             agent._buffer_status("⚠️ Rate limited — switching to fallback provider...")
+                        # Capture the limit-window reset time (Codex 429s carry
+                        # resets_at) so the fallback notice can say how long the
+                        # switch will last.
+                        try:
+                            from agent.error_classifier import extract_usage_limit_reset_at
+                            agent._primary_limit_reset_at = extract_usage_limit_reset_at(api_error)
+                        except Exception:
+                            agent._primary_limit_reset_at = None
                         if agent._try_activate_fallback(reason=classified.reason):
                             retry_count = 0
                             compression_attempts = 0

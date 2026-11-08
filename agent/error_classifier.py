@@ -1250,6 +1250,31 @@ def _extract_error_body(error: Exception) -> dict:
     return {}
 
 
+def extract_usage_limit_reset_at(error: Exception) -> Optional[float]:
+    """Epoch seconds when a 429's usage-limit window resets, if the body says.
+
+    ChatGPT-plan Codex 429s carry ``resets_at`` (epoch) and
+    ``resets_in_seconds`` inside the error object::
+
+        {'error': {'type': 'usage_limit_reached', 'resets_at': 1783818731,
+                   'resets_in_seconds': 15055, ...}}
+
+    Returns None when the error carries no reset information.
+    """
+    body = _extract_error_body(error)
+    payload = body.get("error") if isinstance(body.get("error"), dict) else body
+    if not isinstance(payload, dict):
+        return None
+    resets_at = payload.get("resets_at")
+    if isinstance(resets_at, (int, float)) and float(resets_at) > 0:
+        return float(resets_at)
+    resets_in = payload.get("resets_in_seconds")
+    if isinstance(resets_in, (int, float)) and float(resets_in) > 0:
+        import time
+        return time.time() + float(resets_in)
+    return None
+
+
 def _extract_error_code(body: dict) -> str:
     """Extract an error code string from the response body."""
     if not body:

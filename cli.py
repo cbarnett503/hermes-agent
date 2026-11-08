@@ -3565,6 +3565,19 @@ class HermesCLI:
         return f"[{('█' * filled) + ('░' * max(0, width - filled))}]"
 
     @staticmethod
+    def _format_usage_gauge_label(snapshot: Dict[str, Any]) -> Optional[str]:
+        """Compact account-usage label for the status bar (e.g. ``Plus 62%``).
+
+        Prefixed with the plan name when the provider reports one so the
+        number reads as an account limit, not a second context percentage.
+        """
+        percent = snapshot.get("usage_percent")
+        if percent is None:
+            return None
+        plan = snapshot.get("usage_plan")
+        return f"{plan} {percent}%" if plan else f"⚡ {percent}%"
+
+    @staticmethod
     def _format_prompt_elapsed(prompt_start_time: Optional[float], prompt_duration: float, live: bool = False) -> str:
         """Format per-prompt elapsed time for the status bar.
 
@@ -3628,6 +3641,8 @@ class HermesCLI:
             "context_tokens": 0,
             "context_length": None,
             "context_percent": None,
+            "usage_percent": None,
+            "usage_plan": None,
             "session_input_tokens": 0,
             "session_output_tokens": 0,
             "session_cache_read_tokens": 0,
@@ -3690,6 +3705,24 @@ class HermesCLI:
             snapshot["compressions"] = getattr(compressor, "compression_count", 0) or 0
             if context_length:
                 snapshot["context_percent"] = max(0, min(100, round((context_tokens / context_length) * 100)))
+
+        # Account-usage gauge (plan limits, e.g. ChatGPT Plus windows).
+        # Non-blocking cached read — the status bar renders every 150ms and
+        # must never touch the network.  Tracks the PRIMARY provider even
+        # while a fallback is active: the primary's exhausted window is
+        # exactly what explains the current fallback model.
+        try:
+            primary_provider = (
+                (getattr(agent, "_primary_runtime", None) or {}).get("provider")
+                or getattr(agent, "provider", "")
+            )
+            from agent.account_usage import get_cached_account_usage, usage_gauge
+            gauge = usage_gauge(get_cached_account_usage(primary_provider))
+            if gauge:
+                snapshot["usage_percent"] = gauge["percent"]
+                snapshot["usage_plan"] = gauge["plan"]
+        except Exception:
+            pass
 
         return snapshot
 
@@ -3901,6 +3934,9 @@ class HermesCLI:
                 return self._trim_status_bar_text(text, width)
             if width < 76:
                 parts = [f"⚕ {snapshot['model_short']}", percent_label]
+                usage_label = self._format_usage_gauge_label(snapshot)
+                if usage_label:
+                    parts.append(usage_label)
                 compressions = snapshot.get("compressions", 0)
                 if compressions:
                     parts.append(f"🗜️ {compressions}")
@@ -3924,6 +3960,9 @@ class HermesCLI:
 
             compressions = snapshot.get("compressions", 0)
             parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
+            usage_label = self._format_usage_gauge_label(snapshot)
+            if usage_label:
+                parts.append(usage_label)
             if compressions:
                 parts.append(f"🗜️ {compressions}")
             bg_count = snapshot.get("active_background_tasks", 0)
@@ -3980,6 +4019,13 @@ class HermesCLI:
                         ("class:status-bar-dim", " · "),
                         (self._status_bar_context_style(percent), percent_label),
                     ]
+                    usage_label = self._format_usage_gauge_label(snapshot)
+                    if usage_label:
+                        frags.append(("class:status-bar-dim", " · "))
+                        frags.append((
+                            self._status_bar_context_style(snapshot["usage_percent"]),
+                            usage_label,
+                        ))
                     if compressions:
                         frags.append(("class:status-bar-dim", " · "))
                         frags.append((self._compression_count_style(compressions), f"🗜️ {compressions}"))
@@ -4019,6 +4065,13 @@ class HermesCLI:
                         ("class:status-bar-dim", " "),
                         (bar_style, percent_label),
                     ]
+                    usage_label = self._format_usage_gauge_label(snapshot)
+                    if usage_label:
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append((
+                            self._status_bar_context_style(snapshot["usage_percent"]),
+                            usage_label,
+                        ))
                     if compressions:
                         frags.append(("class:status-bar-dim", " │ "))
                         frags.append((self._compression_count_style(compressions), f"🗜️ {compressions}"))
@@ -9881,7 +9934,7 @@ class HermesCLI:
         cfg = load_config() or {}
         footer_cfg = ((cfg.get("display") or {}).get("runtime_footer") or {})
         current = bool(footer_cfg.get("enabled", False))
-        fields = footer_cfg.get("fields") or ["model", "context_pct", "cwd"]
+        fields = footer_cfg.get("fields") or ["model", "context_pct", "usage_pct", "cwd"]
 
         if arg in {"status", "?"}:
             state = "ON" if current else "OFF"

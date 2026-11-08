@@ -305,3 +305,77 @@ class TestFallbackChainDedup:
 
         assert ok is False
         mock_resolve.assert_not_called()
+
+
+# ── Fallback activation notice ────────────────────────────────────────────
+
+
+class TestFallbackNotice:
+    """One-line user notice on fallback activation (emit + dedup)."""
+
+    def _activate(self, agent, reason=None):
+        from agent.error_classifier import FailoverReason as FR
+        with patch("agent.auxiliary_client.resolve_provider_client",
+                    return_value=(_mock_client(), "gpt-4o")):
+            return agent._try_activate_fallback(
+                reason=reason or FR.rate_limit
+            )
+
+    def _spy(self, agent):
+        emitted, buffered = [], []
+        agent._emit_status = emitted.append
+        agent._buffer_status = buffered.append
+        return emitted, buffered
+
+    def test_rate_limit_notice_emitted_directly_with_reset_time(self):
+        agent = _make_agent(fallback_model={"provider": "openai", "model": "gpt-4o"})
+        emitted, buffered = self._spy(agent)
+        agent._primary_limit_reset_at = 1783818731.0
+
+        assert self._activate(agent) is True
+        assert len(emitted) == 1
+        assert "usage limit hit" in emitted[0]
+        assert "gpt-4o" in emitted[0]
+        assert "until ~" in emitted[0]
+        assert buffered == []
+
+    def test_notice_deduped_on_repeat_activation(self):
+        """Every turn re-probes the primary; the same switch must not
+        re-announce on every turn while a usage window stays exhausted."""
+        agent = _make_agent(fallback_model={"provider": "openai", "model": "gpt-4o"})
+        emitted, buffered = self._spy(agent)
+
+        assert self._activate(agent) is True
+        # Simulate restore_primary_runtime + next turn's re-fallback.
+        agent._fallback_index = 0
+        agent._fallback_activated = False
+        agent.provider = "openrouter"
+        agent.model = "primary-model"
+        assert self._activate(agent) is True
+
+        assert len(emitted) == 1
+        assert len(buffered) == 1  # kept for the terminal-failure trace
+
+    def test_notice_reannounced_after_dedup_window(self):
+        agent = _make_agent(fallback_model={"provider": "openai", "model": "gpt-4o"})
+        emitted, _ = self._spy(agent)
+
+        assert self._activate(agent) is True
+        agent._fallback_index = 0
+        agent._fallback_activated = False
+        agent.provider = "openrouter"
+        agent.model = "primary-model"
+        agent._fallback_notice_at -= 1900  # past the 30-minute window
+
+        assert self._activate(agent) is True
+        assert len(emitted) == 2
+
+    def test_non_quota_reason_uses_generic_message(self):
+        from agent.error_classifier import FailoverReason as FR
+        agent = _make_agent(fallback_model={"provider": "openai", "model": "gpt-4o"})
+        emitted, _ = self._spy(agent)
+
+        assert self._activate(agent, reason=FR.server_error) is True
+        assert len(emitted) == 1
+        assert "Primary model failed" in emitted[0]
+        assert "until ~" not in emitted[0]
