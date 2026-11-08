@@ -123,9 +123,27 @@ function FaceTicker({ color, startedAt }: { color: string; startedAt?: null | nu
   )
 }
 
-function ctxBarColor(pct: number | undefined, t: Theme) {
+export function contextBarColor(pct: number | undefined, t: Theme, compressionThresholdPct?: number) {
   if (pct == null) {
     return t.color.muted
+  }
+
+  if (compressionThresholdPct != null && compressionThresholdPct > 0) {
+    const threshold = Math.max(1, Math.min(100, compressionThresholdPct))
+
+    if (pct >= threshold) {
+      return t.color.statusCritical
+    }
+
+    if (pct >= Math.round(threshold * 0.9)) {
+      return t.color.statusBad
+    }
+
+    if (pct >= Math.round(threshold * 0.75)) {
+      return t.color.statusWarn
+    }
+
+    return t.color.statusGood
   }
 
   if (pct >= 95) {
@@ -311,7 +329,7 @@ export function StatusRule({
   t
 }: StatusRuleProps) {
   const pct = usage.context_percent
-  const barColor = ctxBarColor(pct, t)
+  const barColor = contextBarColor(pct, t, usage.compression_threshold_percent)
 
   const ctxLabel = usage.context_max
     ? `${fmtK(usage.context_used ?? 0)}/${fmtK(usage.context_max)}`

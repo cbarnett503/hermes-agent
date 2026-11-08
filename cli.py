@@ -3443,9 +3443,24 @@ class HermesCLI:
             self._resize_recovery_pending = False
             self._recover_after_resize(app, original_on_resize)
 
-    def _status_bar_context_style(self, percent_used: Optional[int]) -> str:
+    def _status_bar_context_style(
+        self,
+        percent_used: Optional[int],
+        compression_threshold_percent: Optional[int] = None,
+    ) -> str:
         if percent_used is None:
             return "class:status-bar-dim"
+
+        if compression_threshold_percent and compression_threshold_percent > 0:
+            threshold = max(1, min(100, compression_threshold_percent))
+            if percent_used >= threshold:
+                return "class:status-bar-critical"
+            if percent_used >= round(threshold * 0.90):
+                return "class:status-bar-bad"
+            if percent_used >= round(threshold * 0.75):
+                return "class:status-bar-warn"
+            return "class:status-bar-good"
+
         if percent_used >= 95:
             return "class:status-bar-critical"
         if percent_used > 80:
@@ -3532,6 +3547,7 @@ class HermesCLI:
             "context_tokens": 0,
             "context_length": None,
             "context_percent": None,
+            "compression_threshold_percent": None,
             "session_input_tokens": 0,
             "session_output_tokens": 0,
             "session_cache_read_tokens": 0,
@@ -3582,8 +3598,14 @@ class HermesCLI:
             snapshot["context_tokens"] = context_tokens
             snapshot["context_length"] = context_length or None
             snapshot["compressions"] = getattr(compressor, "compression_count", 0) or 0
+            threshold_tokens = getattr(compressor, "threshold_tokens", 0) or 0
             if context_length:
                 snapshot["context_percent"] = max(0, min(100, round((context_tokens / context_length) * 100)))
+                if threshold_tokens:
+                    snapshot["compression_threshold_percent"] = max(
+                        1,
+                        min(100, round((threshold_tokens / context_length) * 100)),
+                    )
 
         return snapshot
 
@@ -3872,7 +3894,7 @@ class HermesCLI:
                         ("class:status-bar", " ⚕ "),
                         ("class:status-bar-strong", snapshot["model_short"]),
                         ("class:status-bar-dim", " · "),
-                        (self._status_bar_context_style(percent), percent_label),
+                        (self._status_bar_context_style(percent, snapshot.get("compression_threshold_percent")), percent_label),
                     ]
                     if compressions:
                         frags.append(("class:status-bar-dim", " · "))
@@ -3899,7 +3921,7 @@ class HermesCLI:
                     else:
                         context_label = "ctx --"
 
-                    bar_style = self._status_bar_context_style(percent)
+                    bar_style = self._status_bar_context_style(percent, snapshot.get("compression_threshold_percent"))
                     compressions = snapshot.get("compressions", 0)
                     bg_count = snapshot.get("active_background_tasks", 0)
                     bg_proc_count = snapshot.get("active_background_processes", 0)

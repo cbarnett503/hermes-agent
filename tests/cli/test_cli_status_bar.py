@@ -29,6 +29,7 @@ def _attach_agent(
     context_tokens: int,
     context_length: int,
     compressions: int = 0,
+    threshold_tokens: int | None = None,
 ):
     cli_obj.agent = SimpleNamespace(
         model=cli_obj.model,
@@ -47,6 +48,7 @@ def _attach_agent(
             last_prompt_tokens=context_tokens,
             context_length=context_length,
             compression_count=compressions,
+            threshold_tokens=threshold_tokens,
         ),
     )
     return cli_obj
@@ -61,6 +63,31 @@ class TestCLIStatusBar:
         assert cli_obj._status_bar_context_style(50) == "class:status-bar-warn"
         assert cli_obj._status_bar_context_style(81) == "class:status-bar-bad"
         assert cli_obj._status_bar_context_style(95) == "class:status-bar-critical"
+
+    def test_context_style_uses_compression_threshold_as_danger_zone(self):
+        cli_obj = _make_cli()
+
+        assert cli_obj._status_bar_context_style(37, 50) == "class:status-bar-good"
+        assert cli_obj._status_bar_context_style(38, 50) == "class:status-bar-warn"
+        assert cli_obj._status_bar_context_style(45, 50) == "class:status-bar-bad"
+        assert cli_obj._status_bar_context_style(50, 50) == "class:status-bar-critical"
+
+    def test_status_snapshot_includes_compression_threshold_percent(self):
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=45_000,
+            completion_tokens=0,
+            total_tokens=45_000,
+            api_calls=1,
+            context_tokens=45_000,
+            context_length=100_000,
+            threshold_tokens=50_000,
+        )
+
+        snapshot = cli_obj._get_status_bar_snapshot()
+
+        assert snapshot["context_percent"] == 45
+        assert snapshot["compression_threshold_percent"] == 50
 
     def test_build_status_bar_text_for_wide_terminal(self):
         cli_obj = _attach_agent(

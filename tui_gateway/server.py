@@ -1347,6 +1347,12 @@ def _get_usage(agent) -> dict:
             usage["context_used"] = ctx_used
             usage["context_max"] = ctx_max
             usage["context_percent"] = max(0, min(100, round(ctx_used / ctx_max * 100)))
+            threshold_tokens = getattr(comp, "threshold_tokens", 0) or 0
+            if threshold_tokens:
+                usage["compression_threshold_percent"] = max(
+                    1,
+                    min(100, round(threshold_tokens / ctx_max * 100)),
+                )
         usage["compressions"] = getattr(comp, "compression_count", 0) or 0
     try:
         from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
