@@ -78,6 +78,7 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("qwen/qwen3.8-max",                       ""),
     # MoonshotAI
     ("moonshotai/kimi-k3",                     "recommended"),
+    ("moonshotai/kimi-k2.6",                   ""),
     # MiniMax
     ("minimax/minimax-m3",                     ""),
     # Z-AI
@@ -250,6 +251,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "qwen/qwen3.8-max",
         # MoonshotAI
         "moonshotai/kimi-k3",
+        "moonshotai/kimi-k2.6",
         # MiniMax
         "minimax/minimax-m3",
         # Z-AI
@@ -1512,16 +1514,27 @@ def fetch_openrouter_models(
     if _openrouter_catalog_cache is not None and not force_refresh:
         return list(_openrouter_catalog_cache)
 
-    # Prefer the remotely-hosted catalog manifest; fall back to the in-repo
-    # snapshot when the manifest is unreachable. Both are curated lists that
+    # Prefer the remotely-hosted catalog manifest, then union in any in-repo
+    # entries the manifest doesn't carry yet. Both are curated lists that
     # drive the picker; the OpenRouter live /v1/models filter (tool support,
     # free pricing) is applied on top either way.
+    #
+    # The merge is additive rather than a straight replace: the manifest is
+    # published on its own cadence, so a model added to OPENROUTER_MODELS here
+    # would otherwise stay invisible until the next manifest release. Manifest
+    # order is preserved (it drives the "recommended" badge below) and local
+    # extras are appended.
     try:
         from hermes_cli.model_catalog import get_curated_openrouter_models
         remote = get_curated_openrouter_models()
     except Exception:
         remote = None
-    fallback = list(remote) if remote else list(OPENROUTER_MODELS)
+    fallback = list(remote) if remote else []
+    seen_ids = {mid for mid, _ in fallback}
+    for mid, desc in OPENROUTER_MODELS:
+        if mid not in seen_ids:
+            seen_ids.add(mid)
+            fallback.append((mid, desc))
     preferred_ids = [mid for mid, _ in fallback]
 
     try:
